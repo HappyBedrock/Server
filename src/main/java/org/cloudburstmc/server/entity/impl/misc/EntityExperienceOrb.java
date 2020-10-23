@@ -82,7 +82,7 @@ public class EntityExperienceOrb extends BaseEntity implements ExperienceOrb {
     public void saveAdditionalData(NbtMapBuilder tag) {
         super.saveAdditionalData(tag);
 
-        tag.putInt("experience value", this.getExperience());
+        tag.putInt("experience value", this.getXpProgress());
         tag.putShort("Age", (short) this.age);
         tag.putShort("PickupDelay", (short) this.pickupDelay);
     }
@@ -181,7 +181,7 @@ public class EntityExperienceOrb extends BaseEntity implements ExperienceOrb {
         return hasUpdate || !this.onGround || this.motion.abs().length() > 0.00001;
     }
 
-    public int getExperience() {
+    public int getXpProgress() {
         return this.data.getInt(EXPERIENCE_VALUE);
     }
 

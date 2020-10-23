@@ -46,7 +46,7 @@ public interface ExperienceOrb extends Entity {
     }
 
     @Nonnegative
-    int getExperience();
+    int getXpProgress();
 
     void setExperience(@Nonnegative int experience);
 

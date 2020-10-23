@@ -66,10 +66,7 @@ import org.cloudburstmc.server.form.CustomForm;
 import org.cloudburstmc.server.form.Form;
 import org.cloudburstmc.server.inventory.*;
 import org.cloudburstmc.server.inventory.transaction.CraftingTransaction;
-import org.cloudburstmc.server.item.behavior.Item;
-import org.cloudburstmc.server.item.behavior.ItemArmor;
-import org.cloudburstmc.server.item.behavior.ItemIds;
-import org.cloudburstmc.server.item.behavior.ItemTool;
+import org.cloudburstmc.server.item.behavior.*;
 import org.cloudburstmc.server.item.enchantment.Enchantment;
 import org.cloudburstmc.server.level.*;
 import org.cloudburstmc.server.level.biome.Biome;
@@ -184,8 +181,6 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
 
     private PermissibleBase perm = null;
 
-    private int exp = 0;
-    private int expLevel = 0;
     protected Location spawnLocation = null;
 
     private Entity killer = null;
@@ -206,6 +201,12 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
     private LoginChainData loginChainData;
 
     public Block breakingBlock = null;
+
+    private int xpLevel;
+    private float xpProgress;
+    protected int totalXp = 0;
+    protected int xpSeed;
+    protected int xpCooldown = 0;
 
     public int pickedXPOrb = 0;
 
@@ -785,14 +786,9 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
             }
         });
 
-        int experience = this.getExperience();
-        if (experience != 0) {
-            this.sendExperience(experience);
-        }
-
-        int level = this.getExperienceLevel();
-        if (level != 0) {
-            this.sendExperienceLevel(this.getExperienceLevel());
+        float experience = this.getXpProgress();
+        if (this.getXpProgress() != 0 || this.getXpLevel() != 0) {
+            this.sendAttributes();
         }
 
         this.teleport(loc, null); // Prevent PlayerTeleportEvent during player spawn
@@ -1117,8 +1113,8 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
         attributes.add(Attribute.getAttribute(Attribute.MAX_HEALTH).setMaxValue(this.getMaxHealth()).setValue(health > 0 ? (health < getMaxHealth() ? health : getMaxHealth()) : 0).toNetwork());
         attributes.add(Attribute.getAttribute(Attribute.MAX_HUNGER).setValue(this.getFoodData().getLevel()).toNetwork());
         attributes.add(Attribute.getAttribute(Attribute.MOVEMENT_SPEED).setValue(this.getMovementSpeed()).toNetwork());
-        attributes.add(Attribute.getAttribute(Attribute.EXPERIENCE_LEVEL).setValue(this.getExperienceLevel()).toNetwork());
-        attributes.add(Attribute.getAttribute(Attribute.EXPERIENCE).setValue(((float) this.getExperience()) / calculateRequireExperience(this.getExperienceLevel())).toNetwork());
+        attributes.add(Attribute.getAttribute(Attribute.EXPERIENCE_LEVEL).setValue(this.getXpLevel()).toNetwork());
+        attributes.add(Attribute.getAttribute(Attribute.EXPERIENCE).setValue(this.getXpProgress()).toNetwork());
         this.sendPacket(pk);
     }
 
@@ -2108,72 +2104,205 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
         }
     }
 
-    public int getExperience() {
-        return this.exp;
+    /**
+     * Returns the player's experience level.
+     */
+    public int getXpLevel() {
+        return this.xpLevel;
     }
 
-    public int getExperienceLevel() {
-        return this.expLevel;
+    /**
+     * Sets the player's experience level. This does not affect their total XP or their XP progress.
+     */
+    public boolean setXpLevel(int level) {
+        return this.setXpAndProgress(level, this.getXpProgress());
     }
 
-    public void addExperience(int add) {
-        if (add == 0) return;
-        int now = this.getExperience();
-        int added = now + add;
-        int level = this.getExperienceLevel();
-        int most = calculateRequireExperience(level);
-        while (added >= most) {  //Level Up!
-            added = added - most;
-            level++;
-            most = calculateRequireExperience(level);
+    public boolean addXpLevels(int amount) {
+        return this.addXpLevels(amount, true);
+    }
+
+    /**
+     * Adds a number of XP levels to the player.
+     */
+    public boolean addXpLevels(int amount, boolean playSound) {
+        int oldLevel = this.getXpLevel();
+        if(this.setXpLevel(oldLevel + amount)){
+            if(playSound){
+                int newLevel = this.getXpLevel();
+                if((newLevel / 5) > (oldLevel / 5)){
+                    this.playLevelUpSound(newLevel);
+                }
+            }
+
+            return true;
         }
-        this.setExperience(added, level);
+
+        return false;
     }
 
-    public static int calculateRequireExperience(int level) {
-        if (level >= 30) {
-            return 112 + (level - 30) * 9;
-        } else if (level >= 15) {
-            return 37 + (level - 15) * 5;
-        } else {
-            return 7 + level * 2;
+    /**
+     * Subtracts a number of XP levels from the player.
+     */
+    public boolean subtractXpLevels(int amount) {
+        return this.addXpLevels(-amount);
+    }
+
+    /**
+     * Returns a value between 0.0 and 1.0 to indicate how far through the current level the player is.
+     */
+    public float getXpProgress() {
+        return this.xpProgress;
+    }
+
+    /**
+     * Sets the player's progress through the current level to a value between 0.0 and 1.0.
+     */
+    public boolean setXpProgress(float progress) {
+        return this.setXpAndProgress(this.getXpLevel(), progress);
+    }
+
+    /**
+     * Returns the number of XP points the player has progressed into their current level.
+     */
+    public int getRemainderXp() {
+        return (int) (ExperienceUtils.getXpToCompleteLevel(this.getXpLevel()) * this.getXpProgress());
+    }
+
+    /**
+     * Returns the amount of XP points the player currently has, calculated from their current level and progress
+     * through their current level. This will be reduced by enchanting deducting levels and is used to calculate the
+     * amount of XP the player drops on death.
+     */
+    public int getCurrentTotalXp() {
+        return ExperienceUtils.getXpToReachLevel(this.getXpLevel()) + this.getRemainderXp();
+    }
+
+    /**
+     * Sets the current total of XP the player has, recalculating their XP level and progress.
+     * Note that this DOES NOT update the player's lifetime total XP.
+     */
+    public boolean setCurrentTotalXp(int amount) {
+        float newLevel = ExperienceUtils.getLevelFromXp(amount);
+
+        return this.setXpAndProgress((int) newLevel, newLevel - ((int) newLevel));
+    }
+
+    public boolean addXp(int amount) {
+        return this.addXp(amount, true);
+    }
+
+    /**
+     * Adds an amount of XP to the player, recalculating their XP level and progress. XP amount will be added to the
+     * player's lifetime XP.
+     *
+     * @param playSound Whether to play level-up and XP gained sounds.
+     */
+    public boolean addXp(int amount, boolean playSound) {
+        int oldLevel = this.getXpLevel();
+        int oldTotal = this.getCurrentTotalXp();
+
+        if(this.setCurrentTotalXp(oldTotal + amount)){
+            if(amount > 0){
+                this.totalXp += amount;
+            }
+
+            if(playSound){
+                int newLevel = this.getXpLevel();
+                if((newLevel / 5) > (oldLevel / 5)){
+                    this.playLevelUpSound(newLevel);
+                }
+                else if(this.getCurrentTotalXp() > oldTotal){
+                    this.level.addSound(Vector3f.from(this.getX(), this.getY(), this.getZ()), Sound.RANDOM_ORB, 1f, 1f); // any better way to convert this to vector3f?
+                }
+            }
+
+            return true;
         }
+
+        return false;
     }
 
-    public void setExperience(int exp) {
-        setExperience(exp, this.getExperienceLevel());
+    private void playLevelUpSound(int newLevel) {
+        int volume = 0x10000000 * (Math.min(30, newLevel) / 5); //No idea why such odd numbers, but this works...
+        this.getLevel().addSound(Vector3f.from(this.getX(), this.getY(), this.getZ()), Sound.RANDOM_LEVELUP, volume, 1f);
     }
 
-    //todo something on performance, lots of exp orbs then lots of packets, could crash client
-
-    public void setExperience(int exp, int level) {
-        this.exp = exp;
-        this.expLevel = level;
-
-        this.sendExperienceLevel(level);
-        this.sendExperience(exp);
+    /**
+     * Takes an amount of XP from the player, recalculating their XP level and progress.
+     */
+    public boolean subtractXp(int amount) {
+        return this.addXp(amount);
     }
 
-    public void sendExperience() {
-        sendExperience(this.getExperience());
-    }
+    protected boolean setXpAndProgress(int level, float progress) {
+        if(this.spawned){
+            PlayerExperienceChangeEvent ev = new PlayerExperienceChangeEvent(this, this.getXpLevel(), this.getXpProgress(), level, progress);
+            getServer().getEventManager().fire(ev);
 
-    public void sendExperience(int exp) {
-        if (this.spawned) {
-            float percent = ((float) exp) / calculateRequireExperience(this.getExperienceLevel());
-            percent = Math.max(0f, Math.min(1f, percent));
-            this.setAttribute(Attribute.getAttribute(Attribute.EXPERIENCE).setValue(percent));
+            if(ev.isCancelled()){
+                return false;
+            }
+
+            this.xpLevel = ev.getNewLevel();
+            this.xpProgress = ev.getNewProgress();
+
+            this.setAttribute(Attribute.getAttribute(Attribute.EXPERIENCE_LEVEL).setValue(this.xpLevel));
+            this.setAttribute(Attribute.getAttribute(Attribute.EXPERIENCE).setValue(this.xpProgress));
+            return true;
         }
+        return false;
     }
 
-    public void sendExperienceLevel() {
-        sendExperienceLevel(this.getExperienceLevel());
+    /**
+     * Returns the total XP the player has collected in their lifetime. Resets when the player dies.
+     * XP levels being removed in enchanting do not reduce this number.
+     */
+    public int getLifetimeTotalXp() {
+        return this.totalXp;
     }
 
-    public void sendExperienceLevel(int level) {
-        if (this.spawned) {
-            this.setAttribute(Attribute.getAttribute(Attribute.EXPERIENCE_LEVEL).setValue(level));
+    /**
+     * Sets the lifetime total XP of the player. This does not recalculate their level or progress. Used for player
+     * score when they die. (TODO: add this when MCPE supports it)
+     */
+    public void setLifetimeTotalXp(int amount) {
+        if(amount < 0){
+            return;
         }
+
+        this.totalXp = amount;
+    }
+
+    /**
+     * Returns whether the human can pickup XP orbs (checks cooldown time)
+     */
+    public boolean canPickupXp() {
+        return this.xpCooldown == 0;
+    }
+
+    public void onPickupXp(int xpValue) {
+        //TODO: Implement mending
+
+        this.addXp(xpValue); //this will still get fired even if the value is 0 due to mending, to play sounds
+        this.resetXpCooldown();
+    }
+
+    public void resetXpCooldown() {
+        this.resetXpCooldown(2);
+    }
+
+    /**
+     * Sets the duration in ticks until the human can pick up another XP orb.
+     */
+    public void resetXpCooldown(int value) {
+        this.xpCooldown = value;
+    }
+
+    public int getXpDropAmount() {
+        //this causes some XP to be lost on death when above level 1 (by design), dropping at most enough points for
+        //about 7.5 levels of XP.
+        return Math.min(100, 7 * this.getXpLevel());
     }
 
     public void setAttribute(Attribute attribute) {
@@ -2312,9 +2441,7 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
 
         tag.listenForInt("GameType", (id) -> this.playerData.setGamemode(GameMode.from(id)));
 
-        int exp = tag.getInt("EXP");
-        int expLevel = tag.getInt("expLevel");
-        this.setExperience(exp, expLevel);
+        this.setXpAndProgress(tag.getInt("expLevel"), ((float)tag.getInt("EXP")) / 100);
 
         tag.listenForInt("foodLevel", this.foodData::setLevel);
         tag.listenForFloat("FoodSaturationLevel", this.foodData::setFoodSaturationLevel);
@@ -2334,8 +2461,8 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
 
         tag.putInt("GameType", this.getGamemode().getVanillaId());
 
-        tag.putInt("EXP", this.getExperience());
-        tag.putInt("expLevel", this.getExperienceLevel());
+        tag.putInt("EXP", (int)(this.getXpProgress() * 100));
+        tag.putInt("expLevel", this.getXpLevel());
 
         tag.putInt("foodLevel", this.getFoodData().getLevel());
         tag.putFloat("foodSaturationLevel", this.getFoodData().getFoodSaturationLevel());
@@ -2499,7 +2626,7 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
         this.health = 0;
         this.scheduleUpdate();
 
-        PlayerDeathEvent ev = new PlayerDeathEvent(this, this.getDrops(), new TranslationContainer(message, params.toArray()), this.getExperienceLevel());
+        PlayerDeathEvent ev = new PlayerDeathEvent(this, this.getDrops(), new TranslationContainer(message, params.toArray()), this.getXpLevel());
 
         ev.setKeepExperience(this.getLevel().getGameRules().get(GameRules.KEEP_INVENTORY));
         ev.setKeepInventory(ev.getKeepExperience());
@@ -2515,11 +2642,11 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
 
         if (!ev.getKeepExperience() && this.getLevel().getGameRules().get(GameRules.DO_ENTITY_DROPS)) {
             if (this.isSurvival() || this.isAdventure()) {
-                int exp = ev.getExperience() * 7;
+                int exp = ev.getXpProgress() * 7;
                 if (exp > 100) exp = 100;
                 this.getLevel().dropExpOrb(this.getPosition(), exp);
             }
-            this.setExperience(0, 0);
+            this.setXpAndProgress(0, 0);
         }
 
         if (showMessages && !ev.getDeathMessage().toString().isEmpty()) {
@@ -3304,7 +3431,7 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
         if (pickedXPOrb < tick && entity instanceof ExperienceOrb && this.boundingBox.isVectorInside(entity.getPosition())) {
             ExperienceOrb experienceOrb = (ExperienceOrb) entity;
             if (experienceOrb.getPickupDelay() <= 0) {
-                int exp = experienceOrb.getExperience();
+                int exp = experienceOrb.getXpProgress();
                 entity.kill();
                 this.getLevel().addSound(this.getPosition(), Sound.RANDOM_ORB);
                 pickedXPOrb = tick;
@@ -3335,7 +3462,7 @@ public class Player extends Human implements CommandSender, InventoryHolder, Chu
                     }
                 }
 
-                this.addExperience(exp);
+                this.addXp(exp);
                 return true;
             }
         }

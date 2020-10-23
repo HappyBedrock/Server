@@ -75,13 +75,14 @@ public class XpCommand extends Command {
         }
 
         if (isLevel) {
-            int newLevel = player.getExperienceLevel();
+            int newLevel = player.getXpLevel();
             newLevel += amount;
             if (newLevel > 24791) newLevel = 24791;
             if (newLevel < 0) {
-                player.setExperience(0, 0);
+                player.setXpLevel(0);
+                player.setXpProgress(0);
             } else {
-                player.setExperience(player.getExperience(), newLevel);
+                player.setXpLevel(newLevel);
             }
             if (amount > 0) {
                 sender.sendMessage(new TranslationContainer("commands.xp.success.levels", amount, player.getName()));
@@ -93,7 +94,8 @@ public class XpCommand extends Command {
             if (amount < 0) {
                 return false;
             }
-            player.addExperience(amount);
+
+            player.addXp(amount);
             sender.sendMessage(new TranslationContainer("commands.xp.success", amount, player.getName()));
             return true;
         }
